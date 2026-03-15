@@ -25,7 +25,7 @@ Add the following to your `.mcp.json`:
   "mcpServers": {
     "pdf-mcp": {
       "command": "uvx",
-      "args": ["--from", "git+ssh://git@github.com/I-CAN-hack/pdf-mcp.git", "pdf-mcp"]
+      "args": ["--from", "git+https://github.com/I-CAN-hack/pdf-mcp.git", "pdf-mcp"]
     }
   }
 }
