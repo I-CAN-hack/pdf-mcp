@@ -1,0 +1,23 @@
+[project]
+name = "pdf-mcp"
+version = "0.1.0"
+description = "MCP server for reading, rendering, and searching PDF files"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]",
+    "pymupdf",
+    "pymupdf4llm",
+]
+
+[project.scripts]
+pdf-mcp = "pdf_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
