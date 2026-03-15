@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "pdf-mcp": {
-      "command": "uvx",
-      "args": ["--from", ".", "pdf-mcp"]
+      "command": "uv",
+      "args": ["run", "src/pdf_mcp/server.py"]
     }
   }
 }
