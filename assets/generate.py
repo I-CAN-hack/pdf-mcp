@@ -161,11 +161,102 @@ def create_search_targets():
     doc.close()
 
 
+def create_large_toc():
+    """PDF with a very large multi-level TOC to test auto-trimming."""
+    doc = fitz.open()
+    toc = []
+    page_num = 0
+
+    for part in range(1, 6):
+        page_num += 1
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 80), f"Part {part}", fontsize=18)
+        toc.append([1, f"Part {part}", page_num])
+
+        for chapter in range(1, 9):
+            page_num += 1
+            page = doc.new_page(width=595, height=842)
+            title = f"Chapter {part}.{chapter}"
+            page.insert_text((72, 80), title, fontsize=14)
+            toc.append([2, title, page_num])
+
+            for section in range(1, 5):
+                page_num += 1
+                page = doc.new_page(width=595, height=842)
+                title = f"Section {part}.{chapter}.{section}"
+                page.insert_text((72, 80), title, fontsize=12)
+                toc.append([3, title, page_num])
+
+    doc.set_toc(toc)
+    doc.save(ASSETS / "large_toc.pdf")
+    doc.close()
+
+
+def create_mega_toc():
+    """PDF with 400+ pages and 4-level deep TOC for comprehensive auto-trim testing.
+
+    Structure:
+      2 volumes (L1) × 8 chapters (L2) × 8 sections (L3) × 2 subsections (L4)
+
+    Entry counts:
+      Level 1:  2
+      Level 2:  16   (cumulative ≤L2:  18)
+      Level 3:  128  (cumulative ≤L3: 146)
+      Level 4:  256  (cumulative ≤L4: 402)
+
+    Full-TOC auto-trim (threshold 100):
+      ≤L2 = 18 fits → best_level=2, total=18, auto_trimmed_to_level=2
+
+    Volume 1 subtree (parent="Volume 1"):
+      8 chapters + 64 sections + 128 subsections = 200 children
+      ≤L2 = 8, ≤L3 = 72 fits → best_level=3, total=72, auto_trimmed_to_level=2 (relative)
+
+    Chapter 1.1 subtree (parent="Chapter 1.1"):
+      8 sections + 16 subsections = 24 children (< 100, no auto-trim)
+    """
+    doc = fitz.open()
+    toc = []
+    page_num = 0
+
+    for vol in range(1, 3):
+        page_num += 1
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 80), f"Volume {vol}", fontsize=18)
+        toc.append([1, f"Volume {vol}", page_num])
+
+        for ch in range(1, 9):
+            page_num += 1
+            page = doc.new_page(width=595, height=842)
+            title = f"Chapter {vol}.{ch}"
+            page.insert_text((72, 80), title, fontsize=14)
+            toc.append([2, title, page_num])
+
+            for sec in range(1, 9):
+                page_num += 1
+                page = doc.new_page(width=595, height=842)
+                title = f"Section {vol}.{ch}.{sec}"
+                page.insert_text((72, 80), title, fontsize=12)
+                toc.append([3, title, page_num])
+
+                for sub in range(1, 3):
+                    page_num += 1
+                    page = doc.new_page(width=595, height=842)
+                    title = f"Subsection {vol}.{ch}.{sec}.{sub}"
+                    page.insert_text((72, 80), title, fontsize=11)
+                    toc.append([4, title, page_num])
+
+    doc.set_toc(toc)
+    doc.save(ASSETS / "mega_toc.pdf")
+    doc.close()
+
+
 if __name__ == "__main__":
     create_basic()
     create_with_diagrams()
     create_nested_toc()
     create_search_targets()
+    create_large_toc()
+    create_mega_toc()
     print(f"Generated test PDFs in {ASSETS}")
     for f in sorted(ASSETS.glob("*.pdf")):
         print(f"  {f.name}")

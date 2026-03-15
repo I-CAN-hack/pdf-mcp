@@ -13,14 +13,15 @@ mcp = FastMCP(
 )
 
 HEADER_FOOTER_MARGIN_PTS = 50
+TOC_AUTO_TRIM_THRESHOLD = 100
 
 
 @mcp.tool()
 def get_pdf_info(filename: str) -> dict:
     """Get metadata and basic info about a PDF file.
 
-    Returns page count, title, author, subject, creator, producer,
-    creation/modification dates, and encryption info.
+    Args:
+        filename: Path to a PDF file.
     """
     doc = fitz.open(filename)
     info = {
@@ -34,16 +35,94 @@ def get_pdf_info(filename: str) -> dict:
 
 
 @mcp.tool()
-def get_table_of_contents(filename: str) -> list[dict]:
+def get_table_of_contents(
+    filename: str,
+    parent: str | None = None,
+    max_level: int | None = None,
+) -> dict:
     """Get the table of contents (bookmarks/outline) from a PDF.
 
-    Returns a list of entries with level, title, and page number.
-    These correspond to the sections shown in a PDF reader's sidebar.
+    When max_level is not specified and the TOC is very large, the depth is automatically
+    reduced to keep the response manageable. The response will include an
+    ``auto_trimmed_to_level`` field and a hint when this happens.
+
+    Args:
+        filename: Path to a PDF file.
+        parent: Return only children of the entry whose title contains this string
+                (case-insensitive). For example, pass a chapter title to get its sections.
+        max_level: Only include entries up to this depth (1=chapters only, 2=sections, etc.).
+                   When used with parent, levels are relative: 1 means direct children only,
+                   2 means children and grandchildren, etc.
     """
     doc = fitz.open(filename)
     toc = doc.get_toc()
     doc.close()
-    return [{"level": level, "title": title, "page": page} for level, title, page in toc]
+
+    # Track whether max_level was explicitly requested
+    explicit_max_level = max_level is not None
+    base_level = 0
+
+    if parent is not None:
+        parent_lower = parent.lower()
+        # Find the first entry whose title matches
+        parent_idx = None
+        parent_level = None
+        for i, (level, title, _page) in enumerate(toc):
+            if parent_lower in title.lower():
+                parent_idx = i
+                parent_level = level
+                break
+        if parent_idx is None:
+            return {
+                "error": f"No TOC entry matching '{parent}'",
+                "total_entries": 0,
+                "entries": [],
+            }
+        # Collect all subsequent entries until we hit an entry at the same or higher level
+        children = []
+        for level, title, page in toc[parent_idx + 1 :]:
+            if level <= parent_level:
+                break
+            children.append((level, title, page))
+        toc = children
+        base_level = parent_level
+        # Make max_level relative to parent
+        if max_level is not None:
+            abs_max_level = parent_level + max_level
+            toc = [entry for entry in toc if entry[0] <= abs_max_level]
+    elif max_level is not None:
+        toc = [entry for entry in toc if entry[0] <= max_level]
+
+    # Auto-trim depth when max_level was not explicitly requested and the TOC is large
+    applied_max_level = None
+    untrimmed_total = len(toc)
+    if not explicit_max_level and len(toc) > TOC_AUTO_TRIM_THRESHOLD:
+        levels_present = sorted(set(entry[0] for entry in toc))
+        # Find the deepest level that keeps entries at or below the threshold.
+        # If even the shallowest level exceeds it, use that (can't go shallower).
+        best_level = levels_present[0]
+        for try_level in levels_present:
+            count = sum(1 for entry in toc if entry[0] <= try_level)
+            if count <= TOC_AUTO_TRIM_THRESHOLD:
+                best_level = try_level
+            else:
+                break
+        toc = [entry for entry in toc if entry[0] <= best_level]
+        applied_max_level = best_level - base_level
+
+    entries = [
+        {"level": level, "title": title, "page": page} for level, title, page in toc
+    ]
+
+    result = {"total_entries": len(entries), "entries": entries}
+    if applied_max_level is not None:
+        result["auto_trimmed_to_level"] = applied_max_level
+        result["hint"] = (
+            f"TOC has {untrimmed_total} entries; trimmed to level {applied_max_level} "
+            f"({len(entries)} entries). Use max_level to request a specific depth, "
+            "or use parent to narrow to a specific section."
+        )
+    return result
 
 
 @mcp.tool()
@@ -57,7 +136,7 @@ def get_page_text(
     """Extract text content from one or more PDF pages.
 
     Args:
-        filename: Path to the PDF file.
+        filename: Path to a PDF file.
         start_page: First page number (1-indexed, inclusive).
         end_page: Last page number (1-indexed, inclusive). Defaults to start_page.
         format: Output format. "json" returns structured page data with block/line/span
@@ -132,7 +211,7 @@ def get_page_image(
     """Render a single PDF page as a PNG image.
 
     Args:
-        filename: Path to the PDF file.
+        filename: Path to a PDF file.
         page: Page number (1-indexed).
         dpi: Image resolution. Default 150 (good balance of readability and size).
         output: "base64" returns the image inline as MCP image content.
@@ -166,7 +245,7 @@ def search_text(
     Returns a list of hits with page number and surrounding context.
 
     Args:
-        filename: Path to the PDF file.
+        filename: Path to a PDF file.
         query: Text to search for.
         context_chars: Characters of context to include around each hit. Default 100.
     """
@@ -185,10 +264,12 @@ def search_text(
                 break
             ctx_start = max(0, idx - context_chars)
             ctx_end = min(len(text), idx + len(query) + context_chars)
-            hits.append({
-                "page": page_idx + 1,
-                "context": text[ctx_start:ctx_end],
-            })
+            hits.append(
+                {
+                    "page": page_idx + 1,
+                    "context": text[ctx_start:ctx_end],
+                }
+            )
             pos = idx + 1
 
     doc.close()
