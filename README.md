@@ -1,20 +1,47 @@
 # pdf-mcp
 
-An MCP server for reading, rendering, and searching PDF files. Built with [PyMuPDF](https://pymupdf.readthedocs.io/) and [PyMuPDF4LLM](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/).
+An MCP server for reading, rendering, and searching PDF files, built on the **\*nix Agent philosophy**.
 
-Designed for use with LLMs that need to read datasheets and other PDFs containing diagrams, tables, and technical content.
+This server represents the "everything is a text stream" design decision of Unix, adapted for the "everything is tokens" nature of LLMs. Instead of a catalog of independent tools, it provides a unified interface for composing powerful workflows.
 
-## Tools
+## The *nix Agent Philosophy
 
-| Tool | Description |
+- **Unified Surface**: A single `run` tool instead of 15 specialized schemas.
+- **Composition**: Native support for pipes (`|`), conditional execution (`&&`, `||`), and sequencing (`;`).
+- **Progressive Discovery**: Use `run("help")` or `run("<command>")` without arguments to discover capabilities on-demand.
+- **Heuristic Feedback**: Rich error messages and metadata footers (`[exit:N | Xs]`) guide the LLM's learning loop.
+
+## The `run` Tool
+
+The `run` tool accepts a command string. Available sub-commands:
+
+| Command | Usage |
 |---|---|
-| `get_pdf_info` | Get metadata about a PDF (page count, author, title, etc.) |
-| `get_table_of_contents` | Get the outline/bookmarks with page numbers for each section |
-| `get_page_text` | Extract text from a page range in `json` (default), `text`, `markdown`, or `html` format. Optionally exclude headers/footers |
-| `get_page_image` | Render a single page as a PNG image, returned as base64 or written to a temp file. Configurable DPI (default 150) |
-| `search_text` | Case-insensitive text search across the entire PDF, returning page numbers and surrounding context |
+| `info` | Get metadata about a PDF (page count, etc.). Usage: `info <file.pdf>` |
+| `toc` | Get the table of contents. Usage: `toc <file.pdf> [--parent <title>]` |
+| `cat` | Extract text. Usage: `cat <file.pdf> [--pages <start-end>] [--format md\|json\|text]` |
+| `see` | Render a page as a PNG. Usage: `see <file.pdf> [--page <N>]` |
+| `grep` | Search text. Usage: `grep <query> <file.pdf>` or piped: `cat ... \| grep <query>` |
 
-All requests are stateless and take the PDF filename as a parameter.
+## Examples
+
+### Read and Search
+```bash
+# Extract text and filter for specific keywords in one call
+run("cat datasheet.pdf | grep 'Maximum Ratings'")
+```
+
+### Discovery & Learning
+```bash
+# Forgot parameters? Run command bare to see usage
+run("see")
+```
+
+### Conditional Workflows
+```bash
+# Check info first, then read if valid
+run("info data.pdf && cat data.pdf --pages 1-2")
+```
 
 ## Setup
 
@@ -31,20 +58,13 @@ Add the following to your `.mcp.json`:
 }
 ```
 
-This will automatically install and run the server using `uvx`.
-
 ## Development
 
 ```bash
-# Install dependencies
-uv sync
+# Setup environment
+uv venv && source .venv/bin/activate
+uv pip install -e .
 
-# Generate test PDFs
-uv run python assets/generate.py
-
-# Run tests
-uv run pytest tests/ -v
-
-# Run the server locally
-uv run pdf-mcp
+# Run verification tests
+python tests/verify_refactor.py
 ```

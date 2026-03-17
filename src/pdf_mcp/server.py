@@ -1,284 +1,399 @@
-"""PDF MCP Server - Read, render, and search PDF files via MCP."""
+"""PDF MCP Server - Read, render, and search PDF files via *nix-style pipes and chains."""
 
 import tempfile
-from typing import Literal
+import time
+import os
+import shlex
+import dataclasses
+import json
+from typing import Literal, List, Optional, Tuple, Callable, Dict
 
 import fitz  # PyMuPDF
 import pymupdf4llm
 from mcp.server.fastmcp import FastMCP, Image
 
+# --- Configuration ---
 mcp = FastMCP(
     "pdf-mcp",
-    instructions="MCP server for reading and searching PDF files",
+    instructions="""PDF MCP Server - Progressive Discovery Interface.
+    
+    This server follows the *nix philosophy: everything is text, and tools are composed via pipes (|) and chains (&&, ||, ;).
+    
+    To discover available commands, call `run(command="help")`.
+    To learn about a specific command, call it without arguments, e.g., `run(command="cat")`.
+    
+    Common patterns:
+    - Get info: info file.pdf
+    - Read text: cat file.pdf --pages 1-5
+    - Search: cat file.pdf | grep "query"
+    - View image: see file.pdf --page 1
+    """,
 )
 
 HEADER_FOOTER_MARGIN_PTS = 50
 TOC_AUTO_TRIM_THRESHOLD = 100
+MAX_OUTPUT_CHARS = 50 * 1024  # 50KB truncation threshold
+OUTPUT_TMP_DIR = "/tmp/pdf-mcp"
 
+@dataclasses.dataclass
+class CommandResult:
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    duration_ms: int = 0
+    binary_data: Optional[bytes] = None
+    binary_format: Optional[str] = None
 
-@mcp.tool()
-def get_pdf_info(filename: str) -> dict:
-    """Get metadata and basic info about a PDF file.
+# --- Sub-command Handlers ---
 
-    Args:
-        filename: Path to a PDF file.
-    """
-    doc = fitz.open(filename)
-    info = {
-        "filename": filename,
-        "page_count": doc.page_count,
-        "metadata": doc.metadata,
-        "is_encrypted": doc.is_encrypted,
-    }
-    doc.close()
-    return info
-
-
-@mcp.tool()
-def get_table_of_contents(
-    filename: str,
-    parent: str | None = None,
-    max_level: int | None = None,
-) -> dict:
-    """Get the table of contents (bookmarks/outline) from a PDF.
-
-    When max_level is not specified and the TOC is very large, the depth is automatically
-    reduced to keep the response manageable. The response will include an
-    ``auto_trimmed_to_level`` field and a hint when this happens.
-
-    Args:
-        filename: Path to a PDF file.
-        parent: Return only children of the entry whose title contains this string
-                (case-insensitive). For example, pass a chapter title to get its sections.
-        max_level: Only include entries up to this depth (1=chapters only, 2=sections, etc.).
-                   When used with parent, levels are relative: 1 means direct children only,
-                   2 means children and grandchildren, etc.
-    """
-    doc = fitz.open(filename)
-    toc = doc.get_toc()
-    doc.close()
-
-    # Track whether max_level was explicitly requested
-    explicit_max_level = max_level is not None
-    base_level = 0
-
-    if parent is not None:
-        parent_lower = parent.lower()
-        # Find the first entry whose title matches
-        parent_idx = None
-        parent_level = None
-        for i, (level, title, _page) in enumerate(toc):
-            if parent_lower in title.lower():
-                parent_idx = i
-                parent_level = level
-                break
-        if parent_idx is None:
-            return {
-                "error": f"No TOC entry matching '{parent}'",
-                "total_entries": 0,
-                "entries": [],
-            }
-        # Collect all subsequent entries until we hit an entry at the same or higher level
-        children = []
-        for level, title, page in toc[parent_idx + 1 :]:
-            if level <= parent_level:
-                break
-            children.append((level, title, page))
-        toc = children
-        base_level = parent_level
-        # Make max_level relative to parent
-        if max_level is not None:
-            abs_max_level = parent_level + max_level
-            toc = [entry for entry in toc if entry[0] <= abs_max_level]
-    elif max_level is not None:
-        toc = [entry for entry in toc if entry[0] <= max_level]
-
-    # Auto-trim depth when max_level was not explicitly requested and the TOC is large
-    applied_max_level = None
-    untrimmed_total = len(toc)
-    if not explicit_max_level and len(toc) > TOC_AUTO_TRIM_THRESHOLD:
-        levels_present = sorted(set(entry[0] for entry in toc))
-        # Find the deepest level that keeps entries at or below the threshold.
-        # If even the shallowest level exceeds it, use that (can't go shallower).
-        best_level = levels_present[0]
-        for try_level in levels_present:
-            count = sum(1 for entry in toc if entry[0] <= try_level)
-            if count <= TOC_AUTO_TRIM_THRESHOLD:
-                best_level = try_level
-            else:
-                break
-        toc = [entry for entry in toc if entry[0] <= best_level]
-        applied_max_level = best_level - base_level
-
-    entries = [
-        {"level": level, "title": title, "page": page} for level, title, page in toc
-    ]
-
-    result = {"total_entries": len(entries), "entries": entries}
-    if applied_max_level is not None:
-        result["auto_trimmed_to_level"] = applied_max_level
-        result["hint"] = (
-            f"TOC has {untrimmed_total} entries; trimmed to level {applied_max_level} "
-            f"({len(entries)} entries). Use max_level to request a specific depth, "
-            "or use parent to narrow to a specific section."
-        )
-    return result
-
-
-@mcp.tool()
-def get_page_text(
-    filename: str,
-    start_page: int = 1,
-    end_page: int | None = None,
-    format: Literal["json", "text", "markdown", "html"] = "json",
-    include_headers_footers: bool = True,
-) -> str | list[dict]:
-    """Extract text content from one or more PDF pages.
-
-    Args:
-        filename: Path to a PDF file.
-        start_page: First page number (1-indexed, inclusive).
-        end_page: Last page number (1-indexed, inclusive). Defaults to start_page.
-        format: Output format. "json" returns structured page data with block/line/span
-                detail. "text" returns plain text. "markdown" returns markdown via
-                PyMuPDF4LLM. "html" returns HTML.
-        include_headers_footers: If False, crops top/bottom margins to exclude
-                                 headers and footers. Default True.
-    """
-    doc = fitz.open(filename)
-
-    if end_page is None:
-        end_page = start_page
-
-    # 0-indexed page list
-    pages = list(range(start_page - 1, end_page))
-
-    if format == "markdown":
-        if not include_headers_footers:
-            for page_idx in pages:
-                page = doc[page_idx]
-                r = page.rect
-                page.set_cropbox(
-                    fitz.Rect(
-                        r.x0,
-                        r.y0 + HEADER_FOOTER_MARGIN_PTS,
-                        r.x1,
-                        r.y1 - HEADER_FOOTER_MARGIN_PTS,
-                    )
-                )
-        result = pymupdf4llm.to_markdown(doc, pages=pages, show_progress=False)
+def handle_info(args: List[str], stdin: str = "") -> CommandResult:
+    """Get metadata and basic info about a PDF file. Usage: info <filename>"""
+    if not args:
+        return CommandResult(stderr="usage: info <filename>", exit_code=1)
+    
+    filename = args[0]
+    try:
+        doc = fitz.open(filename)
+        info = {
+            "filename": filename,
+            "page_count": doc.page_count,
+            "metadata": doc.metadata,
+            "is_encrypted": doc.is_encrypted,
+        }
         doc.close()
-        return result
+        return CommandResult(stdout=json.dumps(info, indent=2))
+    except Exception as e:
+        return CommandResult(stderr=str(e), exit_code=1)
 
-    results = []
-    for page_idx in pages:
-        page = doc[page_idx]
-        clip = None
-        if not include_headers_footers:
-            r = page.rect
-            clip = fitz.Rect(
-                r.x0,
-                r.y0 + HEADER_FOOTER_MARGIN_PTS,
-                r.x1,
-                r.y1 - HEADER_FOOTER_MARGIN_PTS,
-            )
+def handle_toc(args: List[str], stdin: str = "") -> CommandResult:
+    """Get the table of contents. Usage: toc <filename> [--parent <title>] [--max-level <N>]"""
+    if not args:
+        return CommandResult(stderr="usage: toc <filename> [--parent <title>] [--max-level <N>]", exit_code=1)
+    
+    filename = args[0]
+    parent = None
+    max_level = None
+    
+    # Simple arg parsing
+    i = 1
+    while i < len(args):
+        if args[i] == "--parent" and i + 1 < len(args):
+            parent = args[i+1]
+            i += 2
+        elif args[i] == "--max-level" and i + 1 < len(args):
+            max_level = int(args[i+1])
+            i += 2
+        else:
+            i += 1
 
-        if format == "text":
-            results.append(page.get_text("text", clip=clip))
-        elif format == "html":
-            results.append(page.get_text("html", clip=clip))
-        else:  # json
-            data = page.get_text("dict", clip=clip)
-            data["page_number"] = page_idx + 1
-            results.append(data)
+    try:
+        doc = fitz.open(filename)
+        toc = doc.get_toc()
+        doc.close()
 
-    doc.close()
+        explicit_max_level = max_level is not None
+        base_level = 0
 
-    if format == "text":
-        return "\n\n--- Page Break ---\n\n".join(results)
-    if format == "html":
-        return "\n".join(results)
-    return results  # json: list of dicts
+        if parent is not None:
+            parent_lower = parent.lower()
+            parent_idx = None
+            parent_level = None
+            for i, (level, title, _page) in enumerate(toc):
+                if parent_lower in title.lower():
+                    parent_idx = i
+                    parent_level = level
+                    break
+            if parent_idx is None:
+                return CommandResult(stderr=f"No TOC entry matching '{parent}'", exit_code=1)
+            
+            children = []
+            for level, title, page in toc[parent_idx + 1 :]:
+                if level <= parent_level:
+                    break
+                children.append((level, title, page))
+            toc = children
+            base_level = parent_level
+            if max_level is not None:
+                abs_max_level = parent_level + max_level
+                toc = [entry for entry in toc if entry[0] <= abs_max_level]
+        elif max_level is not None:
+            toc = [entry for entry in toc if entry[0] <= max_level]
 
+        untrimmed_total = len(toc)
+        applied_max_level = None
+        if not explicit_max_level and len(toc) > TOC_AUTO_TRIM_THRESHOLD:
+            levels_present = sorted(set(entry[0] for entry in toc))
+            best_level = levels_present[0]
+            for try_level in levels_present:
+                count = sum(1 for entry in toc if entry[0] <= try_level)
+                if count <= TOC_AUTO_TRIM_THRESHOLD:
+                    best_level = try_level
+                else:
+                    break
+            toc = [entry for entry in toc if entry[0] <= best_level]
+            applied_max_level = best_level - base_level
+
+        entries = [{"level": l, "title": t, "page": p} for l, t, p in toc]
+        result = {"total_entries": len(entries), "entries": entries}
+        if applied_max_level is not None:
+            result["auto_trimmed_to_level"] = applied_max_level
+            result["hint"] = f"Trimmed from {untrimmed_total} entries to level {applied_max_level}."
+            
+        return CommandResult(stdout=json.dumps(result, indent=2))
+    except Exception as e:
+        return CommandResult(stderr=str(e), exit_code=1)
+
+def handle_cat(args: List[str], stdin: str = "") -> CommandResult:
+    """Extract text. Usage: cat <filename> [--pages <start-end>] [--format <json|text|md|html>] [--no-headers]"""
+    if not args and not stdin:
+        return CommandResult(stderr="usage: cat <filename> [--pages <start-end>] [--format <json|text|md|html>]", exit_code=1)
+    
+    filename = args[0] if args else None
+    pages_str = None
+    fmt = "text"
+    include_headers = True
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--pages" and i + 1 < len(args):
+            pages_str = args[i+1]
+            i += 2
+        elif args[i] == "--format" and i + 1 < len(args):
+            fmt = args[i+1]
+            i += 2
+        elif args[i] == "--no-headers":
+            include_headers = False
+            i += 1
+        else:
+            i += 1
+
+    try:
+        doc = fitz.open(filename) if filename else None
+        # Handle cases where we might want to pipe text but for PDF MCP, 
+        # 'cat' usually needs the file path.
+        if not doc:
+             return CommandResult(stderr="Error: cat requires a PDF filename", exit_code=1)
+
+        start_page, end_page = 1, doc.page_count
+        if pages_str:
+            if "-" in pages_str:
+                s, e = pages_str.split("-")
+                start_page, end_page = int(s), int(e)
+            else:
+                start_page = end_page = int(pages_str)
+
+        page_indices = list(range(start_page - 1, min(end_page, doc.page_count)))
+
+        if fmt == "markdown" or fmt == "md":
+            if not include_headers:
+                for idx in page_indices:
+                    page = doc[idx]
+                    r = page.rect
+                    page.set_cropbox(fitz.Rect(r.x0, r.y0 + HEADER_FOOTER_MARGIN_PTS, r.x1, r.y1 - HEADER_FOOTER_MARGIN_PTS))
+            res = pymupdf4llm.to_markdown(doc, pages=page_indices, show_progress=False)
+            doc.close()
+            return CommandResult(stdout=res)
+
+        results = []
+        for idx in page_indices:
+            page = doc[idx]
+            clip = None
+            if not include_headers:
+                r = page.rect
+                clip = fitz.Rect(r.x0, r.y0 + HEADER_FOOTER_MARGIN_PTS, r.x1, r.y1 - HEADER_FOOTER_MARGIN_PTS)
+            
+            if fmt == "text":
+                results.append(page.get_text("text", clip=clip))
+            elif fmt == "html":
+                results.append(page.get_text("html", clip=clip))
+            else:  # json
+                data = page.get_text("dict", clip=clip)
+                data["page_number"] = idx + 1
+                results.append(data)
+        doc.close()
+
+        if fmt == "text":
+            return CommandResult(stdout="\n\n--- Page Break ---\n\n".join(results))
+        if fmt == "html":
+            return CommandResult(stdout="\n".join(results))
+        return CommandResult(stdout=json.dumps(results, indent=2))
+    except Exception as e:
+        return CommandResult(stderr=str(e), exit_code=1)
+
+def handle_see(args: List[str], stdin: str = "") -> CommandResult:
+    """Render a page as image. Usage: see <filename> [--page <N>] [--dpi <150>] [--output <base64|file>]"""
+    if not args:
+        return CommandResult(stderr="usage: see <filename> [--page <N>] [--dpi <150>] [--output <base64|file>]", exit_code=1)
+    
+    filename = args[0]
+    page_num = 1
+    dpi = 150
+    output_mode = "base64"
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--page" and i + 1 < len(args):
+            page_num = int(args[i+1])
+            i += 2
+        elif args[i] == "--dpi" and i + 1 < len(args):
+            dpi = int(args[i+1])
+            i += 2
+        elif args[i] == "--output" and i + 1 < len(args):
+            output_mode = args[i+1]
+            i += 2
+        else:
+            i += 1
+
+    try:
+        doc = fitz.open(filename)
+        page = doc[page_num - 1]
+        pix = page.get_pixmap(dpi=dpi)
+        img_bytes = pix.tobytes("png")
+        doc.close()
+
+        if output_mode == "file":
+             os.makedirs(OUTPUT_TMP_DIR, exist_ok=True)
+             with tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=OUTPUT_TMP_DIR, prefix="page_") as tmp:
+                 tmp.write(img_bytes)
+                 return CommandResult(stdout=f"Image saved to {tmp.name} ({pix.width}x{pix.height}px)")
+        
+        return CommandResult(stdout=f"[image: png, {len(img_bytes)} bytes]", binary_data=img_bytes, binary_format="png")
+    except Exception as e:
+        return CommandResult(stderr=str(e), exit_code=1)
+
+def handle_grep(args: List[str], stdin: str = "") -> CommandResult:
+    """Search text. Usage: cat ... | grep <query> or grep <query> <filename>"""
+    if not args and not stdin:
+         return CommandResult(stderr="usage: grep <query> [filename]", exit_code=1)
+    
+    query = args[0]
+    content = stdin
+    filename = args[1] if len(args) > 1 else None
+
+    try:
+        if filename:
+            doc = fitz.open(filename)
+            hits = []
+            for i in range(doc.page_count):
+                text = doc[i].get_text("text")
+                if query.lower() in text.lower():
+                    # Simple mock of context extraction
+                    idx = text.lower().find(query.lower())
+                    hits.append({"page": i+1, "context": text[max(0, idx-50):idx+len(query)+50]})
+            doc.close()
+            return CommandResult(stdout=json.dumps(hits, indent=2))
+        else:
+            # Pipe mode
+            lines = [l for l in content.splitlines() if query.lower() in l.lower()]
+            return CommandResult(stdout="\n".join(lines))
+    except Exception as e:
+        return CommandResult(stderr=str(e), exit_code=1)
+
+def handle_help(args: List[str], stdin: str = "") -> CommandResult:
+    """Show available commands. Usage: help"""
+    help_text = "Available commands:\n"
+    for name, func in COMMANDS.items():
+        doc = func.__doc__.split(".")[0] if func.__doc__ else "No description"
+        help_text += f"  {name:<8} - {doc}\n"
+    return CommandResult(stdout=help_text)
+
+COMMANDS = {
+    "info": handle_info,
+    "toc": handle_toc,
+    "cat": handle_cat,
+    "see": handle_see,
+    "grep": handle_grep,
+    "help": handle_help,
+}
+
+# --- Core Logic ---
+
+class ChainParser:
+    def __init__(self, registry: Dict[str, Callable]):
+        self.registry = registry
+
+    def run(self, command_line: str) -> str:
+        try:
+            tokens = shlex.split(command_line)
+        except ValueError as e:
+            return f"[error] invalid command line: {e}\n[exit:1 | 0ms]"
+
+        segments = []
+        current = []
+        for token in tokens:
+            if token in ["|", "&&", "||", ";"]:
+                segments.append((current, token))
+                current = []
+            else:
+                current.append(token)
+        segments.append((current, None))
+
+        last_res = CommandResult()
+        stdin = ""
+        
+        for i, (args, operator) in enumerate(segments):
+            if not args: continue
+            
+            if i > 0:
+                prev_op = segments[i-1][1]
+                if prev_op == "&&" and last_res.exit_code != 0: break
+                if prev_op == "||" and last_res.exit_code == 0: break
+
+            cmd = args[0]
+            start = time.time()
+            if cmd in self.registry:
+                last_res = self.registry[cmd](args[1:], stdin=stdin)
+            else:
+                last_res = CommandResult(stderr=f"unknown command: {cmd}", exit_code=127)
+            last_res.duration_ms = int((time.time() - start) * 1000)
+
+            if operator == "|":
+                stdin = last_res.stdout
+            else:
+                stdin = ""
+
+        return self.present(last_res)
+
+    def present(self, result: CommandResult) -> str | Image:
+        # Binary Guard / Direct Image return
+        if result.binary_data and result.binary_format == "png":
+            return Image(data=result.binary_data, format="png")
+        
+        output = result.stdout
+        if result.exit_code != 0:
+            if output: output += "\n"
+            output += f"[stderr] {result.stderr}" if result.stderr else "[error] failed"
+
+        # Truncation
+        if len(output) > MAX_OUTPUT_CHARS:
+            os.makedirs(OUTPUT_TMP_DIR, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, dir=OUTPUT_TMP_DIR, prefix="cmd_") as tmp:
+                tmp.write(output.encode("utf-8"))
+            output = output[:MAX_OUTPUT_CHARS] + f"\n\n--- output truncated ---\nFull output: {tmp.name}\nExplore: cat {tmp.name} | grep ..."
+
+        return f"{output}\n[exit:{result.exit_code} | {result.duration_ms}ms]"
+
+# --- MCP Tool ---
+
+mcp_parser = ChainParser(COMMANDS)
 
 @mcp.tool()
-def get_page_image(
-    filename: str,
-    page: int = 1,
-    dpi: int = 150,
-    output: Literal["base64", "file"] = "base64",
-):
-    """Render a single PDF page as a PNG image.
-
-    Args:
-        filename: Path to a PDF file.
-        page: Page number (1-indexed).
-        dpi: Image resolution. Default 150 (good balance of readability and size).
-        output: "base64" returns the image inline as MCP image content.
-                "file" writes to a temp file and returns the path.
+def run(command: str):
+    """Execute a PDF tool or a pipeline of commands.
+    
+    Available commands:
+      info <file.pdf>              - Metadata & page count
+      toc <file.pdf>               - Table of contents
+      cat <file.pdf> [options]     - Extract text (--pages, --format, --no-headers)
+      see <file.pdf> [options]     - Render page (--page, --dpi)
+      grep <query> [file.pdf]      - Search text (can be piped)
+      
+    Operators: | (pipe), && (on success), || (on fail), ; (sequence)
     """
-    doc = fitz.open(filename)
-    pdf_page = doc[page - 1]
-    pixmap = pdf_page.get_pixmap(dpi=dpi)
-    png_bytes = pixmap.tobytes("png")
-    doc.close()
-
-    if output == "file":
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".png", delete=False, prefix="pdf_page_"
-        )
-        tmp.write(png_bytes)
-        tmp.close()
-        return f"Image saved to {tmp.name} ({pixmap.width}x{pixmap.height}px)"
-
-    return Image(data=png_bytes, format="png")
-
-
-@mcp.tool()
-def search_text(
-    filename: str,
-    query: str,
-    context_chars: int = 100,
-) -> list[dict]:
-    """Search for text in a PDF file (case-insensitive).
-
-    Returns a list of hits with page number and surrounding context.
-
-    Args:
-        filename: Path to a PDF file.
-        query: Text to search for.
-        context_chars: Characters of context to include around each hit. Default 100.
-    """
-    doc = fitz.open(filename)
-    query_lower = query.lower()
-    hits = []
-
-    for page_idx in range(doc.page_count):
-        text = doc[page_idx].get_text("text")
-        text_lower = text.lower()
-        pos = 0
-
-        while True:
-            idx = text_lower.find(query_lower, pos)
-            if idx == -1:
-                break
-            ctx_start = max(0, idx - context_chars)
-            ctx_end = min(len(text), idx + len(query) + context_chars)
-            hits.append(
-                {
-                    "page": page_idx + 1,
-                    "context": text[ctx_start:ctx_end],
-                }
-            )
-            pos = idx + 1
-
-    doc.close()
-    return hits
-
+    return mcp_parser.run(command)
 
 def main():
     mcp.run()
-
 
 if __name__ == "__main__":
     main()
