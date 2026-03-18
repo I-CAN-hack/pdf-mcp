@@ -31,6 +31,8 @@ Add the following to your `.mcp.json`:
 }
 ```
 
+Or for codex run `codex mcp add pdf-mcp -- uvx --from git+https://github.com/I-CAN-hack/pdf-mcp.git pdf-mcp`.
+
 This will automatically install and run the server using `uvx`.
 
 ## Development
