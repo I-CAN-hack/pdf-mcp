@@ -5,8 +5,8 @@ description = "MCP server for reading, rendering, and searching PDF files"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]",
-    "pymupdf",
+    "mcp[cli]>=1.26,<2",
+    "pymupdf>=1.27.2,<2",
     "pymupdf4llm",
 ]
 

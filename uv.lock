@@ -471,8 +471,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"] },
-    { name = "pymupdf" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },
+    { name = "pymupdf", specifier = ">=1.27.2,<2" },
     { name = "pymupdf4llm" },
 ]
 
