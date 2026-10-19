@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-import fitz
+import pymupdf
 
 ASSETS = Path(__file__).parent
 
 
 def create_basic():
     """Simple 3-page PDF with metadata, TOC, headers/footers, and searchable text."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({
         "title": "Test Document",
         "author": "Test Author",
@@ -48,7 +48,7 @@ def create_basic():
 
 def create_with_diagrams():
     """PDF with vector drawings to test image rendering."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
 
     page.insert_text((72, 60), "Page with Diagrams", fontsize=16)
@@ -56,14 +56,14 @@ def create_with_diagrams():
     # Draw some shapes to simulate a diagram
     # Rectangle
     shape = page.new_shape()
-    shape.draw_rect(fitz.Rect(72, 100, 250, 200))
+    shape.draw_rect(pymupdf.Rect(72, 100, 250, 200))
     shape.finish(color=(0, 0, 0), fill=(0.9, 0.9, 1), width=1.5)
     shape.commit()
 
     page.insert_text((110, 160), "Component A", fontsize=10)
 
     shape = page.new_shape()
-    shape.draw_rect(fitz.Rect(320, 100, 500, 200))
+    shape.draw_rect(pymupdf.Rect(320, 100, 500, 200))
     shape.finish(color=(0, 0, 0), fill=(1, 0.9, 0.9), width=1.5)
     shape.commit()
 
@@ -71,13 +71,13 @@ def create_with_diagrams():
 
     # Arrow between boxes
     shape = page.new_shape()
-    shape.draw_line(fitz.Point(250, 150), fitz.Point(320, 150))
+    shape.draw_line(pymupdf.Point(250, 150), pymupdf.Point(320, 150))
     shape.finish(color=(0, 0, 0), width=2)
     shape.commit()
 
     # Circle
     shape = page.new_shape()
-    shape.draw_circle(fitz.Point(286, 350), 80)
+    shape.draw_circle(pymupdf.Point(286, 350), 80)
     shape.finish(color=(0, 0.4, 0), fill=(0.9, 1, 0.9), width=1.5)
     shape.commit()
 
@@ -91,7 +91,7 @@ def create_with_diagrams():
             x = 72 + col * 120
             y = y_start + row * 25
             shape = page.new_shape()
-            shape.draw_rect(fitz.Rect(x, y, x + 120, y + 25))
+            shape.draw_rect(pymupdf.Rect(x, y, x + 120, y + 25))
             shape.finish(color=(0, 0, 0), width=0.5)
             shape.commit()
             if row == 0:
@@ -107,7 +107,7 @@ def create_with_diagrams():
 
 def create_nested_toc():
     """PDF with a multi-level table of contents."""
-    doc = fitz.open()
+    doc = pymupdf.open()
 
     sections = [
         (1, "Introduction"),
@@ -136,7 +136,7 @@ def create_nested_toc():
 
 def create_search_targets():
     """PDF with known text patterns for testing search."""
-    doc = fitz.open()
+    doc = pymupdf.open()
 
     page1 = doc.new_page()
     page1.insert_text((72, 80), "Resistance values and specifications", fontsize=14)
@@ -163,7 +163,7 @@ def create_search_targets():
 
 def create_large_toc():
     """PDF with a very large multi-level TOC to test auto-trimming."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     toc = []
     page_num = 0
 
@@ -214,7 +214,7 @@ def create_mega_toc():
     Chapter 1.1 subtree (parent="Chapter 1.1"):
       8 sections + 16 subsections = 24 children (< 100, no auto-trim)
     """
-    doc = fitz.open()
+    doc = pymupdf.open()
     toc = []
     page_num = 0
 

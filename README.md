@@ -1,6 +1,6 @@
 # pdf-mcp
 
-An MCP server for reading, rendering, and searching PDF files. Built with [PyMuPDF](https://pymupdf.readthedocs.io/) and [PyMuPDF4LLM](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/).
+An MCP server for reading, rendering, and searching PDF files. Built with [PyMuPDF 2](https://pymupdf.readthedocs.io/).
 
 Designed for use with LLMs that need to read datasheets and other PDFs containing diagrams, tables, and technical content.
 

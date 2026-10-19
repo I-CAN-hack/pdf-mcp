@@ -6,8 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=1.26,<2",
-    "pymupdf>=1.27.2,<2",
-    "pymupdf4llm",
+    "pymupdf>=2,<3",
 ]
 
 [project.scripts]

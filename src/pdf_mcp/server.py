@@ -1,11 +1,14 @@
 """PDF MCP Server - Read, render, and search PDF files via MCP."""
 
+import sys
 import tempfile
 from typing import Literal
 
-import fitz  # PyMuPDF
-import pymupdf4llm
+import pymupdf
 from mcp.server.fastmcp import FastMCP, Image
+
+# Keep library diagnostics off the MCP JSON-RPC stream.
+pymupdf.set_messages(stream=sys.stderr)
 
 mcp = FastMCP(
     "pdf-mcp",
@@ -23,7 +26,7 @@ def get_pdf_info(filename: str) -> dict:
     Args:
         filename: Path to a PDF file.
     """
-    doc = fitz.open(filename)
+    doc = pymupdf.open(filename)
     info = {
         "filename": filename,
         "page_count": doc.page_count,
@@ -54,7 +57,7 @@ def get_table_of_contents(
                    When used with parent, levels are relative: 1 means direct children only,
                    2 means children and grandchildren, etc.
     """
-    doc = fitz.open(filename)
+    doc = pymupdf.open(filename)
     toc = doc.get_toc()
     doc.close()
 
@@ -141,11 +144,11 @@ def get_page_text(
         end_page: Last page number (1-indexed, inclusive). Defaults to start_page.
         format: Output format. "json" returns structured page data with block/line/span
                 detail. "text" returns plain text. "markdown" returns markdown via
-                PyMuPDF4LLM. "html" returns HTML.
+                PyMuPDF. "html" returns HTML.
         include_headers_footers: If False, crops top/bottom margins to exclude
                                  headers and footers. Default True.
     """
-    doc = fitz.open(filename)
+    doc = pymupdf.open(filename)
 
     if end_page is None:
         end_page = start_page
@@ -159,14 +162,14 @@ def get_page_text(
                 page = doc[page_idx]
                 r = page.rect
                 page.set_cropbox(
-                    fitz.Rect(
+                    pymupdf.Rect(
                         r.x0,
                         r.y0 + HEADER_FOOTER_MARGIN_PTS,
                         r.x1,
                         r.y1 - HEADER_FOOTER_MARGIN_PTS,
                     )
                 )
-        result = pymupdf4llm.to_markdown(doc, pages=pages, show_progress=False)
+        result = doc.to_markdown(pages=pages, show_progress=False)
         doc.close()
         return result
 
@@ -176,7 +179,7 @@ def get_page_text(
         clip = None
         if not include_headers_footers:
             r = page.rect
-            clip = fitz.Rect(
+            clip = pymupdf.Rect(
                 r.x0,
                 r.y0 + HEADER_FOOTER_MARGIN_PTS,
                 r.x1,
@@ -217,7 +220,7 @@ def get_page_image(
         output: "base64" returns the image inline as MCP image content.
                 "file" writes to a temp file and returns the path.
     """
-    doc = fitz.open(filename)
+    doc = pymupdf.open(filename)
     pdf_page = doc[page - 1]
     pixmap = pdf_page.get_pixmap(dpi=dpi)
     png_bytes = pixmap.tobytes("png")
@@ -249,7 +252,7 @@ def search_text(
         query: Text to search for.
         context_chars: Characters of context to include around each hit. Default 100.
     """
-    doc = fitz.open(filename)
+    doc = pymupdf.open(filename)
     query_lower = query.lower()
     hits = []
 
